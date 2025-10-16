@@ -1,0 +1,6 @@
+streamlit
+openai
+azure-search-documents==11.4.0
+azure-storage-blob
+PyPDF2
+python-docx
