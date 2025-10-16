@@ -70,22 +70,13 @@ def upload_and_index_directly(uploaded_file):
         return None
     
     st.info(f"Processing '{uploaded_file.name}'...")
-    timing = {}
-    import time
     
-    # Time extraction
-    start = time.time()
     full_text = extract_text_from_file(uploaded_file)
-    timing['extraction'] = time.time() - start
-    
     if not full_text:
         st.error(f"Could not extract text from '{uploaded_file.name}'. The file might be empty or image-based.")
         return False
 
-    # Time chunking
-    start = time.time()
     text_chunks = chunk_text(full_text)
-    timing['chunking'] = time.time() - start
     
     documents_to_upload = []
     base_filename = os.path.splitext(uploaded_file.name)[0]
@@ -100,26 +91,11 @@ def upload_and_index_directly(uploaded_file):
         })
     
     try:
-        # Time Azure Search upload
-        start = time.time()
+        # Upload to Azure Search in batches
         batch_size = 10
         for batch_start in range(0, len(documents_to_upload), batch_size):
             batch = documents_to_upload[batch_start:batch_start + batch_size]
             search_client.upload_documents(documents=batch)
-        timing['search_upload'] = time.time() - start
-        
-        # Time Blob Storage upload
-        start = time.time()
-        if BLOB_CONNECTION_STRING:
-            try:
-                blob_service_client = BlobServiceClient.from_connection_string(BLOB_CONNECTION_STRING)
-                blob_container_name = "documents"
-                blob_name = f"{st.session_state.session_id}/{uploaded_file.name}"
-                blob_client = blob_service_client.get_blob_client(container=blob_container_name, blob=blob_name)
-                blob_client.upload_blob(uploaded_file.getvalue(), overwrite=True)
-            except Exception as blob_error:
-                pass
-        timing['blob_upload'] = time.time() - start
         
         # Mark file as processed and clear outdated summaries
         st.session_state.processed_files.add(uploaded_file.name)
@@ -129,10 +105,7 @@ def upload_and_index_directly(uploaded_file):
         st.session_state.quiz = ""
         st.session_state.flashcards = ""
         
-        # Show timing breakdown
-        timing_str = " | ".join([f"{k}: {v:.2f}s" for k, v in timing.items()])
         st.success(f"✅ '{uploaded_file.name}' uploaded successfully! ({len(text_chunks)} chunks)")
-        st.caption(f"⏱️ Timing: {timing_str}")
         return True
     except Exception as e:
         st.error(f"Failed to upload '{uploaded_file.name}': {e}")
