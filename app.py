@@ -9,6 +9,8 @@ from azure.core.credentials import AzureKeyCredential
 from azure.storage.blob import BlobServiceClient
 import PyPDF2
 import docx
+import threading
+import queue
 
 # --- 1. Secure Configuration and Credentials ---
 # Reads all secrets from environment variables for secure deployment.
@@ -85,19 +87,22 @@ def upload_and_index_directly(uploaded_file):
         })
     
     try:
-        # Upload to Azure Search with session isolation
-        search_client.upload_documents(documents=documents_to_upload)
+        # Optimize: Upload to Azure Search in smaller batches
+        batch_size = 10
+        for batch_start in range(0, len(documents_to_upload), batch_size):
+            batch = documents_to_upload[batch_start:batch_start + batch_size]
+            search_client.upload_documents(documents=batch)
         
-        # Optional: Store to Blob Storage in session-specific folder
-        try:
-            blob_service_client = BlobServiceClient.from_connection_string(BLOB_CONNECTION_STRING)
-            blob_container_name = "documents"
-            # Create session-specific path: documents/session-abc123/filename.pdf
-            blob_name = f"{st.session_state.session_id}/{uploaded_file.name}"
-            blob_client = blob_service_client.get_blob_client(container=blob_container_name, blob=blob_name)
-            blob_client.upload_blob(uploaded_file.getvalue(), overwrite=True)
-        except Exception as blob_error:
-            st.warning(f"File indexed but Blob Storage upload skipped: {blob_error}")
+        # Optional: Upload to Blob Storage (can be skipped for speed)
+        if BLOB_CONNECTION_STRING:
+            try:
+                blob_service_client = BlobServiceClient.from_connection_string(BLOB_CONNECTION_STRING)
+                blob_container_name = "documents"
+                blob_name = f"{st.session_state.session_id}/{uploaded_file.name}"
+                blob_client = blob_service_client.get_blob_client(container=blob_container_name, blob=blob_name)
+                blob_client.upload_blob(uploaded_file.getvalue(), overwrite=True)
+            except Exception as blob_error:
+                pass  # Silently skip blob storage errors
         
         # Mark file as processed and clear outdated summaries
         st.session_state.processed_files.add(uploaded_file.name)
@@ -265,16 +270,27 @@ with st.sidebar:
     
     if uploaded_files:
         st.subheader("Processing Files...")
+        col1, col2 = st.columns([2, 1])
+        
+        with col1:
+            # Show progress bar
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+        
         success_count = 0
-        for uploaded_file in uploaded_files:
+        total_files = len(uploaded_files)
+        
+        for idx, uploaded_file in enumerate(uploaded_files):
+            status_text.text(f"Processing {idx + 1}/{total_files}: {uploaded_file.name}")
             result = upload_and_index_directly(uploaded_file)
             if result is True:
                 success_count += 1
-            elif result is False:
-                pass  # Error already displayed in function
+            progress_bar.progress((idx + 1) / total_files)
         
         if success_count > 0:
             st.session_state.uploaded_count += success_count
+            progress_bar.empty()
+            status_text.empty()
             st.info(f"⏳ Please wait 2-3 seconds for the index to update, then regenerate your summaries and quizzes.")
     
     st.divider()
