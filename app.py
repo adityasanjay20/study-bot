@@ -7,7 +7,7 @@ from openai import AzureOpenAI
 from azure.search.documents import SearchClient
 from azure.core.credentials import AzureKeyCredential
 from azure.storage.blob import BlobServiceClient
-import PyPDF2
+import pdfplumber
 import docx
 import threading
 import queue
@@ -35,12 +35,16 @@ st.set_page_config(page_title="Study Bot AI", page_icon="🎓", layout="wide", i
 def extract_text_from_file(uploaded_file):
     """Extracts text content from an uploaded file (PDF, DOCX, or TXT)."""
     if uploaded_file.type == "application/pdf":
-        pdf_reader = PyPDF2.PdfReader(io.BytesIO(uploaded_file.getvalue()))
         text = ""
-        for page in pdf_reader.pages:
-            page_text = page.extract_text()
-            if page_text:
-                text += page_text
+        try:
+            with pdfplumber.open(io.BytesIO(uploaded_file.getvalue())) as pdf:
+                for page in pdf.pages:
+                    page_text = page.extract_text()
+                    if page_text:
+                        text += page_text + "\n"
+        except Exception as e:
+            st.warning(f"Error extracting PDF: {e}. Trying fallback method...")
+            return ""
         return text
     elif uploaded_file.type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
         doc = docx.Document(io.BytesIO(uploaded_file.getvalue()))

@@ -1,6 +1,7 @@
 streamlit
 openai
-azure-search-documents==11.4.0
+azure-search-documents
+azure-core
 azure-storage-blob
-PyPDF2
+pdfplumber
 python-docx
