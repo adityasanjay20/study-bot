@@ -58,7 +58,11 @@ def chunk_text(text, chunk_size=5000, overlap=1000):
     return chunks
 
 def upload_and_index_directly(uploaded_file):
-    """Extracts, chunks, and directly uploads document content to the search index."""
+    """Extracts, chunks, and directly uploads document content to the search index with session isolation."""
+    # Skip if already processed in this session
+    if uploaded_file.name in st.session_state.processed_files:
+        return None
+    
     st.info(f"Processing '{uploaded_file.name}'...")
     
     full_text = extract_text_from_file(uploaded_file)
@@ -73,19 +77,36 @@ def upload_and_index_directly(uploaded_file):
     sanitized_prefix = re.sub(r'[^a-zA-Z0-9_-]', '_', base_filename)
 
     for i, chunk in enumerate(text_chunks):
+        # Include session_id in document ID to isolate users
+        doc_id = f"{st.session_state.session_id}-{sanitized_prefix}-{i}"
         documents_to_upload.append({
-            "id": f"{sanitized_prefix}-{i}",
+            "id": doc_id,
             "content": chunk,
         })
     
     try:
-        # Initialize BlobServiceClient inside the function to use the env variable
-        blob_service_client = BlobServiceClient.from_connection_string(BLOB_CONNECTION_STRING)
-        blob_container_name = "documents"
-        blob_client = blob_service_client.get_blob_client(container=blob_container_name, blob=uploaded_file.name)
-        blob_client.upload_blob(uploaded_file.getvalue(), overwrite=True)
-
+        # Upload to Azure Search with session isolation
         search_client.upload_documents(documents=documents_to_upload)
+        
+        # Optional: Store to Blob Storage in session-specific folder
+        try:
+            blob_service_client = BlobServiceClient.from_connection_string(BLOB_CONNECTION_STRING)
+            blob_container_name = "documents"
+            # Create session-specific path: documents/session-abc123/filename.pdf
+            blob_name = f"{st.session_state.session_id}/{uploaded_file.name}"
+            blob_client = blob_service_client.get_blob_client(container=blob_container_name, blob=blob_name)
+            blob_client.upload_blob(uploaded_file.getvalue(), overwrite=True)
+        except Exception as blob_error:
+            st.warning(f"File indexed but Blob Storage upload skipped: {blob_error}")
+        
+        # Mark file as processed and clear outdated summaries
+        st.session_state.processed_files.add(uploaded_file.name)
+        st.session_state.last_upload_time = datetime.now()
+        st.session_state.session_documents[uploaded_file.name] = len(text_chunks)
+        st.session_state.summary = ""
+        st.session_state.quiz = ""
+        st.session_state.flashcards = ""
+        
         st.success(f"✅ '{uploaded_file.name}' uploaded successfully! ({len(text_chunks)} chunks indexed)")
         return True
     except Exception as e:
@@ -112,6 +133,18 @@ def get_answer_from_ai(user_question, search_results):
         max_tokens=800
     )
     return response.choices[0].message.content
+
+def search_session_documents(search_text):
+    """Search only documents from the current session."""
+    try:
+        # Search with a filter for current session ID
+        results = search_client.search(search_text=search_text, top=5, filter=f"id eq '{st.session_state.session_id}*'")
+        return list(results)
+    except:
+        # Fallback: search all and filter in Python (less efficient but works)
+        results = search_client.search(search_text=search_text, top=20)
+        session_results = [r for r in results if r['id'].startswith(st.session_state.session_id)]
+        return session_results[:5]
 
 def generate_summary_from_ai(full_text):
     """Generates a concise summary of the uploaded documents."""
@@ -215,6 +248,15 @@ if 'flashcards' not in st.session_state:
     st.session_state.flashcards = ""
 if 'uploaded_count' not in st.session_state:
     st.session_state.uploaded_count = 0
+if 'processed_files' not in st.session_state:
+    st.session_state.processed_files = set()
+if 'last_upload_time' not in st.session_state:
+    st.session_state.last_upload_time = None
+if 'session_id' not in st.session_state:
+    import uuid
+    st.session_state.session_id = str(uuid.uuid4())[:8]  # Create unique session ID
+if 'session_documents' not in st.session_state:
+    st.session_state.session_documents = {}  # Store docs in memory per session
 
 # --- 5. Sidebar: Document Management ---
 with st.sidebar:
@@ -225,9 +267,15 @@ with st.sidebar:
         st.subheader("Processing Files...")
         success_count = 0
         for uploaded_file in uploaded_files:
-            if upload_and_index_directly(uploaded_file):
+            result = upload_and_index_directly(uploaded_file)
+            if result is True:
                 success_count += 1
-        st.session_state.uploaded_count = success_count
+            elif result is False:
+                pass  # Error already displayed in function
+        
+        if success_count > 0:
+            st.session_state.uploaded_count += success_count
+            st.info(f"⏳ Please wait 2-3 seconds for the index to update, then regenerate your summaries and quizzes.")
     
     st.divider()
     
@@ -238,7 +286,7 @@ with st.sidebar:
         if st.button("Create Summary", key="summary_btn", use_container_width=True):
             with st.spinner("Creating summary from all documents..."):
                 try:
-                    all_results = search_client.search(search_text="*", top=100)
+                    all_results = search_session_documents("*")
                     full_text = "\n\n".join([result['content'] for result in all_results])
                     
                     if full_text:
@@ -254,7 +302,7 @@ with st.sidebar:
         if st.button("Create Quiz", key="quiz_btn", use_container_width=True):
             with st.spinner("Creating quiz..."):
                 try:
-                    all_results = search_client.search(search_text="*", top=100)
+                    all_results = search_session_documents("*")
                     full_text = "\n\n".join([result['content'] for result in all_results])
                     
                     if full_text:
@@ -270,7 +318,7 @@ with st.sidebar:
         if st.button("Create Flashcards", key="flash_btn", use_container_width=True):
             with st.spinner("Creating flashcards..."):
                 try:
-                    all_results = search_client.search(search_text="*", top=100)
+                    all_results = search_session_documents("*")
                     full_text = "\n\n".join([result['content'] for result in all_results])
                     
                     if full_text:
@@ -282,7 +330,11 @@ with st.sidebar:
                     st.error(f"Error generating flashcards: {e}")
     
     st.divider()
-    st.caption(f"📊 Documents uploaded: {st.session_state.uploaded_count}")
+    st.caption(f"📊 Session ID: `{st.session_state.session_id}`")
+    st.caption(f"📄 Documents in session: {len(st.session_state.session_documents)}")
+    if st.session_state.last_upload_time:
+        time_since = (datetime.now() - st.session_state.last_upload_time).total_seconds()
+        st.caption(f"⏱️ Last upload: {time_since:.0f} seconds ago")
 
 # --- 6. Main Content Area ---
 tab1, tab2, tab3, tab4 = st.tabs(["💬 Q&A", "📋 Summary", "❓ Quiz", "🎯 Flashcards"])
@@ -301,8 +353,7 @@ with tab1:
     if user_question and search_btn:
         with st.spinner("🔍 Searching your documents..."):
             try:
-                results = search_client.search(search_text=user_question, top=5)
-                search_results = list(results)
+                search_results = search_session_documents(user_question)
                 
                 if not search_results:
                     st.warning("⚠️ No relevant information found in your documents.")
